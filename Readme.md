@@ -1,108 +1,116 @@
-# Case Resolution Desk
+# Case Resolution Desk — Technical Documentation
 
-A full-stack tool that helps a SkillBridge coordinator review a learner case, reach a defensible recommendation, and track what happens next.
-
-Rules are computed in deterministic Python. The LLM explains the outcome with cited policy. Cases are persisted to SQLite.
-
----
-
-## Stack
-
-- **Backend:** Python 3.9+, FastAPI, SQLAlchemy, SQLite
-- **Retrieval:** TF-IDF (scikit-learn) over 5 seeded policy documents
-- **LLM:** Groq (`openai/gpt-oss-20b`) — explain-only, never decides
-- **Frontend:** React + Vite + Tailwind
+SkillBridge helpdesk tool. A coordinator enters a learner's facts, gets a
+rule-based recommendation with cited policy, and the case is saved.
 
 ---
 
-## Setup
+## 1. Overview
 
-### Backend
+Full-stack web app for SkillBridge helpdesk coordinators. The coordinator
+submits a learner's facts, the backend evaluates them against five policy
+documents in code, the LLM explains the result with citations, and the case
+is persisted to SQLite.
 
-```bash
-cd backend
-python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env              # then edit .env and add GROQ_API_KEY
-uvicorn app.main:app --reload
+Key separation:
+
+- Rules are in Python code. Deterministic.
+- The LLM only explains. It cannot decide.
+- Cases persist locally.
+
+The tool never issues approvals or certificates. Those are human decisions.
+
+---
+
+## 2. Architecture
+
+```text
+Frontend (React + Vite + Tailwind)
+        │  HTTP/JSON
+        ▼
+FastAPI Backend
+ ├── Pydantic validation
+ ├── rules_engine.py     → decides eligibility
+ ├── retrieval.py        → TF-IDF over policy chunks
+ ├── llm_explainer.py    → Groq, explains only
+ ├── database.py         → SQLite
+ └── main.py             → pipeline orchestrator
+        │
+        ▼
+Policy corpus (KB-01 … KB-05, Markdown)
 ```
 
-Backend: http://localhost:8000
-Docs: http://localhost:8000/docs
+Pipeline: validate → evaluate rules → retrieve chunks → explain → persist.
 
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend: http://localhost:5173
+Thresholds (80%, 3 sessions, 70/100) are hardcoded. Policy files are read
+only by retrieval, to give the LLM text to cite.
 
 ---
 
-## Environment Variables
+## 3. Data Model
 
-Create `backend/.env` from `backend/.env.example`:
+**CaseFacts** (input): `learner_name`, `question`, `attendance_pct`,
+`live_sessions`, `capstone_score`, `medical_note_offered`,
+`medical_note_verified`, `submission_safe`, `extension_requested`,
+`extension_request_time`, `extension_approved`, `makeup_requested`,
+`makeup_approved`, `case_date`.
 
-```
-GROQ_API_KEY=your_groq_api_key_here
-GROQ_MODEL=openai/gpt-oss-20b
-DATABASE_URL=sqlite:///./cases.db
-```
+Unknown values use `None` and stay unknown.
 
-Get a free key at https://console.groq.com/keys.
+**RuleOutcome** (output): `recommendation` (eligible / ineligible / pending /
+on_hold), `status` (Open / Waiting for Learner / Waiting for Mentor / Ready
+for Review / Closed), per-check results, `blockers`, `missing_facts`,
+`next_action`, `citations`.
 
----
+**CheckResult**: `passed` (True / False / None), `actual`, `required`, `source`.
 
-## API Routes
-
-- `POST /api/cases/analyze` — create + analyze a case
-  - Request: `CaseFacts` JSON
-  - Response: recommendation, status, rule outcome, LLM explanation, citations, missing facts, next action
-- `GET /api/cases` — list all cases
-- `GET /api/cases/{id}` — full case detail
-- `POST /api/cases/{id}/notes` — add a case note
-- `GET /health` — health + LLM status
-
-Rejects impossible numbers (attendance > 100, score > 100) with HTTP 422.
+**SQLite tables**: `cases`, `case_notes`, `citations`.
 
 ---
 
-## Retrieval Approach
+## 4. Policy Corpus
 
-- 5 policy documents (KB-01 to KB-05) seeded in `backend/app/policies/`.
-- Each file is split into chunks by `##` section heading.
-- Metadata preserved per chunk: `doc_id`, `version`, `effective_date`, `status`.
-- TF-IDF index built at startup; queries embed the case question + key facts.
-- Top-k chunks returned with metadata.
-- **Version control:** KB-05 is labeled SUPERSEDED and never drives rule decisions for cases on/after 2026-10-01. It can only be cited in the explanation to clarify the version conflict.
+| ID | Title | Version | Status |
+|----|-------|---------|--------|
+| KB-01 | Attendance and certification | v2 | CURRENT |
+| KB-02 | Capstone policy | v3 | CURRENT |
+| KB-03 | Submission and security | v2 | CURRENT |
+| KB-04 | Helpdesk workflow | v1 | CURRENT |
+| KB-05 | Old capstone policy | v1 | SUPERSEDED by KB-02 |
+
+KB-05 is never used to decide a current case. It is cited only as
+SUPERSEDED when a question involves the old 60-point rule.
 
 ---
 
-## Rules Approach
+## 5. Rules Engine
 
-All thresholds and approval checks live in `backend/app/rules_engine.py` as pure Python functions. The LLM is never consulted for decisions.
-
-Deterministic rules:
+All thresholds and approvals live in `rules_engine.py` as pure Python.
 
 | Rule | Threshold | Source |
 |------|-----------|--------|
 | Attendance | ≥ 80% | KB-01 v2 |
 | Live sessions | ≥ 3 | KB-01 v2 |
-| Capstone score | ≥ 70 | KB-02 v3 (never 60) |
-| Submission must be safe | yes | KB-03 v2 |
+| Capstone | ≥ 70/100 | KB-02 v3 |
+| Submission safe | yes | KB-03 v2 |
 
-Approval rules:
+Approval logic:
 
-- Medical note offered ≠ verified ≠ waiver (KB-01).
-- Extension requires request before deadline AND mentor approval (KB-02).
-- Submission with a secret → on hold, overrides all other checks (KB-03).
-- Unknown values (`None`) stay pending — never coerced to 0 or assumed sufficient.
+- Medical note offered ≠ verified ≠ waiver.
+- Extension requires request before deadline AND mentor approval.
+- Submission hold (KB-03) overrides all other checks.
+- Unknown values stay pending.
 
-Status assignment (KB-04):
+Recommendation:
+
+1. Unsafe submission → `on_hold`
+2. Missing facts → `pending`
+3. Threshold failure with a cure path → `pending`
+4. Threshold failure without a cure path → `ineligible`
+5. Pending mentor approval → `pending`
+6. All clear → `eligible`
+
+Status (KB-04 order):
 
 1. Unsafe submission → `Waiting for Learner`
 2. Pending mentor approval → `Waiting for Mentor`
@@ -111,9 +119,133 @@ Status assignment (KB-04):
 
 ---
 
-## Tests
+## 6. Retrieval
 
-Two focused automated checks (plus two more):
+TF-IDF (scikit-learn) over policy chunks.
+
+- Each policy file is split by `##` heading.
+- Each chunk carries `doc_id`, `version`, `effective_date`, `status`, `section`, `text`.
+- Index built once at startup.
+- Query = case question + key facts.
+- Top 6 chunks returned with metadata.
+- KB-05 chunks are relabeled SUPERSEDED at retrieval time.
+- Retrieval never influences rule decisions.
+
+---
+
+## 7. LLM Layer
+
+- Provider: Groq
+- Model: `openai/gpt-oss-20b` (configurable)
+- Temperature 0.2, max 500 tokens
+- System prompt: explain only, cite sources, do not decide.
+- User prompt includes: facts, computed outcome, retrieved chunks, task.
+- Grounding: the LLM sees only the retrieved chunks and the outcome.
+- Failure: returns `(None, error)`; rule outcome still returned; case still saved.
+
+---
+
+## 8. API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/cases/analyze` | Create + analyze a case |
+| GET | `/api/cases` | List all cases |
+| GET | `/api/cases/{id}` | Full case detail |
+| POST | `/api/cases/{id}/notes` | Add a note |
+| GET | `/health` | Health + LLM status |
+
+**POST `/api/cases/analyze`** request:
+
+```json
+{
+  "learner_name": "Nadia",
+  "question": "Can I still receive a certificate?",
+  "attendance_pct": 76,
+  "live_sessions": 2,
+  "capstone_score": null,
+  "medical_note_offered": true,
+  "medical_note_verified": false,
+  "submission_safe": null,
+  "extension_requested": true,
+  "extension_request_time": "2026-10-07T11:00:00",
+  "extension_approved": false
+}
+```
+
+Response includes: `case_id`, `recommendation`, `status`, `rule_outcome`
+(with per-check results, blockers, missing_facts, citations),
+`llm_explanation`, `llm_error`, `missing_facts`, `next_action`.
+
+Errors: `422` on impossible numbers (attendance > 100). `404` on missing case.
+
+---
+
+## 9. Frontend
+
+React 18 + Vite + Tailwind.
+
+- **New Case:** form plus quick-load buttons for Nadia, Sara, Hamza, Missing.
+- **Analysis:** recommendation badge, status badge, LLM explanation,
+  rule checks, blockers, missing facts, citations with CURRENT / SUPERSEDED
+  badges, next-action callout.
+- **History:** table of all cases, click to reopen.
+
+LLM failure is shown as an amber banner; the rule outcome stays visible.
+
+---
+
+## 10. Persistence
+
+SQLite file `backend/cases.db`. Three tables: `cases`, `case_notes`, `citations`.
+
+Cases survive backend restarts. No migrations; schema changes require
+deleting the file.
+
+---
+
+## 11. Failure Handling
+
+| Failure | Behavior |
+|---------|----------|
+| Groq timeout / 429 / bad key | `llm_error` set, rule outcome returned, case saved |
+| Invalid input | HTTP 422 |
+| Missing `GROQ_API_KEY` | LLM calls return "not configured"; rule outcome unaffected |
+| Empty retrieval | LLM sees fewer chunks; outcome unaffected |
+| DB deleted | Fresh DB created on next start |
+
+No stack traces or API keys are exposed to the client.
+
+---
+
+## 12. Acceptance Cases
+
+| Case | Recommendation | Status | Key citations |
+|------|----------------|--------|---------------|
+| Nadia | `pending` | Waiting for Mentor | KB-01 v2, KB-02 v3 |
+| Hamza | `on_hold` | Waiting for Learner | KB-03 v2 |
+| Sara | `ineligible` | Ready for Review | KB-02 v3, KB-05 SUPERSEDED |
+| Missing | `pending` | Waiting for Learner | KB-01 v2, KB-04 v1 |
+
+---
+
+## 13. Testing
+
+Six pytest tests, all passing.
+
+Required by the brief:
+
+- Threshold check: attendance 76 → `ineligible`.
+- Approval / unknown-value check: attendance `None` → `pending`.
+
+Extra:
+
+- Submission hold overrides good numbers.
+- Nadia's full pipeline via HTTP.
+- Impossible attendance rejected with 422.
+- Sara cites KB-05 as SUPERSEDED.
+
+Run:
 
 ```bash
 cd backend
@@ -122,142 +254,91 @@ pytest tests/test_rules.py -v
 pytest tests/test_api.py -v
 ```
 
-- `test_rules.py` — threshold check + unknown-value check + submission hold
-- `test_api.py` — Nadia's case returns pending/Waiting for Mentor; invalid attendance rejected with 422; Sara's case cites KB-05 as SUPERSEDED
+---
 
-All 6 tests pass.
+## 14. Assumptions
+
+- One coordinator, no auth.
+- Case date defaults to 2026-10-07.
+- Unknown values stay unknown.
+- A request is not an approval.
+- "Eligible" means requirements met → Ready for Review, not certified.
+- KB-05 never decides a current case.
+
+Human-approval decisions (not automated):
+
+- Mentor approves makeups and extensions.
+- Coordinator verifies medical evidence and clean submissions.
+- Coordinator closes cases.
 
 ---
 
-## Manual Acceptance Results
+## 15. Limitations
 
-### Case A — Nadia
+- Local only: no deployment, no auth, no multi-user.
+- SQLite only; no migrations; not backed up.
+- TF-IDF retrieval only; no embeddings, no semantic search.
+- Thresholds hardcoded; policy changes need a code change.
+- No prompt-injection protection; the source pack is treated as trusted.
+- LLM output is non-deterministic; no post-hoc citation validator.
+- No file upload; all facts are typed manually.
+- No case editing or re-analysis.
+- Six tests total; no frontend tests, no load tests.
+- Secrets in `.env` only; no external secrets manager.
 
-- Recommendation: `pending`
-- Status: `Waiting for Mentor`
-- Blockers: attendance 76 < 80; sessions 2 < 3; medical note unverified; extension pending mentor approval
-- Citations: KB-01 v2, KB-02 v3, KB-03 v2
-- ✅ Matches expected behavior
+Out of scope:
 
-### Case B — Hamza
-
-- Recommendation: `on_hold`
-- Status: `Waiting for Learner`
-- Blockers: secret found in submission (KB-03 overrides good numbers)
-- Citations: KB-01 v2, KB-02 v3, KB-03 v2
-- ✅ Must not be declared eligible despite 82/3/78
-
-### Case C — Sara
-
-- Recommendation: `ineligible`
-- Status: `Ready for Review`
-- Blockers: capstone 65 < 70 (KB-02 v3)
-- Citations: KB-01 v2, KB-02 v3, **KB-05 v1 (SUPERSEDED)**, KB-03 v2
-- ✅ Correctly uses current 70 threshold, ignores old 60
-
-### Case D — Missing Data
-
-- Recommendation: `pending`
-- Status: `Waiting for Learner`
-- Missing facts: attendance_pct, live_sessions, capstone_score, submission_safe
-- ✅ No fabricated values
-
----
-
-## Failure Handling
-
-If the LLM provider fails (timeout, 429, auth error):
-
-- Rule outcome is still returned.
-- Case is still saved.
-- `llm_explanation` is null; `llm_error` is a readable message.
-- No stack traces or API keys are exposed.
-
-To demonstrate: temporarily set `GROQ_API_KEY=invalid` in `.env`, restart the backend, and analyze a case. The rule outcome renders; the UI shows an amber "LLM temporarily unavailable" banner.
-
----
-
-## Assumptions
-
-- One coordinator; no authentication or multi-user access.
-- Case date defaults to 2026-10-07 unless specified.
-- Unknown values remain unknown; they are never coerced or assumed.
-- A request alone is not an approval (KB-02, KB-01).
-- "Eligible" means the recorded requirements are met → Ready for Review. It does not mean a certificate has been issued (KB-01).
-- KB-05 is never used to decide a current case.
-
----
-
-## Human-Approval Decisions (Not Automated)
-
-- Mentor approves makeup sessions (KB-01).
-- Mentor approves capstone extensions (KB-02).
-- Coordinator verifies medical evidence (KB-01).
-- Coordinator confirms a clean submission after a secret hold (KB-03).
-- Coordinator closes the case (KB-04).
-
----
-
-## Limitations
-
-### Scope and Deployment
-- Local-only. No deployment, no hosting, no CI/CD.
-- No authentication, no user accounts, no multi-user access. One coordinator per running instance.
-- No rate limiting or request throttling on the API.
-- Single-process FastAPI; not designed for concurrent heavy load.
-
-### Data and Persistence
-- SQLite only. Not suitable for multi-writer or production-scale use.
-- SQLite database file (`cases.db`) is not versioned or backed up.
-- No migration system (e.g., Alembic). Schema changes require deleting and recreating the DB.
-- No soft deletes or audit history beyond the `case_notes` table.
-
-### Retrieval
-- TF-IDF only. No embeddings, no semantic search, no vector store.
-- Retrieval quality depends on keyword overlap between the query and policy text.
-- The retrieval index is rebuilt on every server restart (no persistent index).
-- No re-ranking, no query expansion, no synonym handling.
-- Top-k is fixed at 6 and not tunable at runtime.
-
-### Rules Engine
-- All thresholds (80%, 3 sessions, 70/100) are hardcoded in Python. Changing a policy requires a code change and redeploy.
-- The case date is passed by the client and not cross-checked against any system clock or server-side source of truth.
-- Business days are assumed Monday–Friday with no holidays, per the fictional assessment spec.
-- No support for historical decisions (before 1 Oct 2026) beyond citing KB-05 as superseded.
-
-### LLM Layer
-- The LLM is treated as an explainer only. All decisions are made in code.
-- If the LLM is unavailable, the app still works but the natural-language explanation is missing.
-- LLM output is grounded only by the retrieved chunks in the prompt; there is no post-hoc grounding verification or citation validator.
-- No prompt-injection protection. If retrieved policy text contained malicious instructions, the LLM could be influenced. The source pack is treated as trusted.
-- Model IDs on Groq change over time. The `.env` value must be updated manually if the model is deprecated.
-- Temperature is 0.2 for consistency, but LLM output is still non-deterministic across runs.
-
-### Frontend
-- No form-level validation for required fields beyond HTML `required`.
-- No optimistic updates, offline mode, or retry logic for failed requests.
-- No pagination, filtering, or search on the History list.
-- No file upload for medical notes or submissions. All facts are typed manually.
-- No case editing or re-analysis. A case can only be reopened for viewing.
-
-### Testing
-- 6 tests total. Coverage is focused on the two required checks (threshold and unknown-value) plus 4 extra.
-- No integration test against a real Groq endpoint (mocked/absent).
-- No load, stress, or concurrency tests.
-- No frontend tests.
-
-### Security
-- API key stored in `.env` and never sent to the client, but there is no secrets manager.
-- No HTTPS, no CSRF protection, no CORS hardening beyond localhost origins.
-- No input sanitization beyond Pydantic validation.
-- The Groq key was exposed in a development chat during the build and has been rotated.
-
-### Out of Scope (Intentionally Not Built)
-- Document upload flow (mentioned as optional in the brief).
+- Document upload flow.
 - Editable draft responses.
-- Audit trail beyond `case_notes`.
-- Multi-approval workflows (makeup + extension queues).
-- Notifications or reminders for pending approvals.
-- Any paid service, hosting, or external database.
+- Audit trail UI.
+- Multi-approval workflows.
+- Notifications.
+
+---
+
+## 16. Setup
+
+**Backend:**
+
+```bash
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env      # add GROQ_API_KEY
+uvicorn app.main:app --reload
+```
+
+**Frontend:**
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+**Environment** (`backend/.env`):
+
+```text
+GROQ_API_KEY=your_key_here
+GROQ_MODEL=openai/gpt-oss-20b
+DATABASE_URL=sqlite:///./cases.db
+```
+
+---
+
+## 17. Future Work
+
+- Embeddings for retrieval.
+- Document upload with version review.
+- Case editing and re-analysis.
+- Audit trail UI.
+- Notifications for pending approvals.
+- Multi-user with auth.
+- Persistent retrieval index.
+- Citation validator on LLM output.
+- Historical replay before 1 Oct 2026.
+
+---
 
 All policies, learner cases, and program details are fictional.
