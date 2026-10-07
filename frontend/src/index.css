@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-paper-100 font-sans text-ink-900 antialiased;
+    background-image: radial-gradient(70% 45% at 50% -5%, #FCE6D8 0%, rgba(252, 230, 216, 0) 70%);
+    background-repeat: no-repeat;
+  }
+  :focus-visible {
+    outline: 2px solid #C2571F;
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: #F8CDB1;
+    color: #0F0F14;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-paper-300 bg-white shadow-card;
+  }
+  .input {
+    @apply w-full rounded-xl border border-paper-400 bg-white px-3.5 py-2.5 text-sm text-ink-900
+           placeholder:text-ink-400 transition
+           focus:border-ember-500 focus:outline-none focus:ring-4 focus:ring-ember-100;
+  }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
