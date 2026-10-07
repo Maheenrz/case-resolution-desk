@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import Markdown, { Inline } from './Markdown';
+import { addNote } from './api';
 
 const NEUTRAL = 'bg-paper-200 text-ink-700 ring-paper-300';
 
@@ -156,7 +158,74 @@ export default function Analysis({ data, onBack }) {
           </ul>
         </Card>
       )}
+
+      {/* Notes */}
+      {caseId && <Notes caseId={caseId} initialNotes={data.notes || []} />}
     </div>
+  );
+}
+
+function Notes({ caseId, initialNotes }) {
+  const [notes, setNotes] = useState(initialNotes);
+  const [text, setText] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!text.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await addNote(caseId, text.trim());
+      setNotes((n) => [...n, res.data]);
+      setText('');
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to save note');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card title="Case notes" aside={`${notes.length} ${notes.length === 1 ? 'note' : 'notes'}`}>
+      {notes.length > 0 ? (
+        <ul className="mb-5 space-y-3">
+          {notes.map((n) => (
+            <li key={n.id} className="rounded-lg border border-paper-300 bg-paper-100 p-3">
+              <p className="text-[15px] leading-7 text-ink-800">{n.note}</p>
+              <p className="mt-1 text-xs text-ink-500">
+                {new Date(n.created_at).toLocaleString()}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mb-5 text-sm text-ink-500">No notes yet.</p>
+      )}
+
+      <form onSubmit={submit} className="space-y-3">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={2}
+          placeholder="Add a note about this case (e.g., called learner, mentor replied)..."
+          className="input"
+        />
+        {error && (
+          <p className="text-sm text-rose-600">{error}</p>
+        )}
+        <div className="flex justify-end">
+          <button
+            type="submit"
+            disabled={saving || !text.trim()}
+            className="rounded-lg bg-ink-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-ink-800 disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Add note'}
+          </button>
+        </div>
+      </form>
+    </Card>
   );
 }
 

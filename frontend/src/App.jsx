@@ -28,6 +28,7 @@ export default function App() {
         missing_facts: data.rule_outcome?.missing_facts,
         next_action: data.rule_outcome?.next_action,
         llm_explanation: data.llm_explanation,
+        notes: data.notes || [],
       });
       setView('analysis');
     } catch (e) {
