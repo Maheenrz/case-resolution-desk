@@ -1,6 +1,3 @@
-Here's the complete `README.md` in one copyable block:
-
-```markdown
 # Case Resolution Desk
 
 A full-stack tool that helps a SkillBridge coordinator review a learner case, reach a defensible recommendation, and track what happens next.
@@ -264,4 +261,3 @@ To demonstrate: temporarily set `GROQ_API_KEY=invalid` in `.env`, restart the ba
 - Any paid service, hosting, or external database.
 
 All policies, learner cases, and program details are fictional.
-```
